@@ -1,0 +1,236 @@
+{
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "criar-cena",
+        "responseMode": "responseNode",
+        "options": {
+          "binaryPropertyName": "data"
+        }
+      },
+      "id": "e3c1dfb9-7339-4709-876c-c69b9f7d6d23",
+      "name": "Webhook - Rascunho",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        48,
+        240
+      ],
+      "webhookId": "6ce7028b-4f3c-4ddb-b98f-dcd9daee89cd"
+    },
+    {
+      "parameters": {
+        "resource": "image",
+        "operation": "analyze",
+        "modelId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "gpt-4o",
+          "cachedResultName": "GPT-4O"
+        },
+        "text": "Analise cuidadosamente o rascunho/desenho enviado.\n\nO objetivo NÃO é criar uma imagem ainda. O objetivo é interpretar a intenção visual e estrutural do desenho.\n\nIdentifique:\n1. tipo provável de ambiente;\n2. layout geral e geometria;\n3. posição relativa dos módulos;\n4. elementos centrais;\n5. elementos laterais;\n6. prateleiras, gavetas, portas, nichos e armários superiores;\n7. janela, espelho, sapateira ou outros elementos anotados;\n8. perspectiva aproximada do desenho;\n9. textos escritos à mão e o que eles parecem indicar;\n10. relações espaciais importantes.\n\nIMPORTANTE:\n- O desenho é uma referência conceitual.\n- Não invente medidas exatas.\n- Diferencie claramente o que está visível do que é apenas uma hipótese.\n- Preserve a composição do desenho.\n- Não transforme o rascunho em uma descrição genérica.\n- Se houver algo ambíguo, marque como \"incerto\" em vez de inventar.\n\nRetorne uma análise detalhada em português.",
+        "inputType": "base64",
+        "binaryPropertyName": "=data",
+        "options": {
+          "detail": "high",
+          "maxTokens": 1200
+        }
+      },
+      "id": "9b1c3f65-2a21-4f38-9002-86730d1409f2",
+      "name": "IA Visão - Analisar Rascunho",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 2,
+      "position": [
+        288,
+        240
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": "LRwpsZ9r6pdmM4NI",
+          "name": "OpenAI account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "id": "4281244d-b07d-4ece-bcf9-ba8baf55545f",
+      "name": "Preservar Rascunho + Análise",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        528,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "Você é um diretor de arte especializado em transformar rascunhos de ambientes em especificações visuais precisas.\n\nVocê recebeu:\n- o rascunho original;\n- uma análise feita por uma IA de visão;\n- opcionalmente uma descrição textual enviada pelo usuário.\n\nSua tarefa nesta etapa é transformar essas informações em uma ESTRUTURA DE CENA.\n\nNão gere ainda um prompt artístico longo. Primeiro organize a intenção visual.\n\nREGRAS:\n- Preserve o layout e a composição do rascunho.\n- Não invente medidas exatas.\n- Não remova elementos desenhados.\n- Não adicione móveis que não estejam representados ou solicitados.\n- Quando algo estiver ambíguo, marque como \"incerto\".\n- O resultado deverá ser JSON válido, sem markdown.\n\nEstrutura obrigatória:\n{\n  \"tipo_ambiente\": \"\",\n  \"layout\": \"\",\n  \"perspectiva\": \"\",\n  \"elementos_principais\": [],\n  \"modulo_esquerdo\": {},\n  \"modulo_central\": {},\n  \"modulo_direito\": {},\n  \"elementos_superiores\": [],\n  \"aberturas\": [],\n  \"detalhes_anotados\": [],\n  \"materiais_informados\": [],\n  \"iluminacao_informada\": [],\n  \"informacoes_do_usuario\": \"\",\n  \"restricoes\": [],\n  \"incertezas\": []\n}\n\nAnálise da IA de visão:\n{{ $json.content || $json.text || JSON.stringify($json) }}\n\nDescrição textual enviada pelo usuário:\n{{ $json.body?.pedido || $json.body?.text || $json.pedido || $json.text || \"Nenhuma descrição textual foi enviada.\" }}\n\nRetorne SOMENTE o JSON.",
+        "options": {}
+      },
+      "id": "fe8da178-5c7d-4a58-9b4a-e19a5be311ac",
+      "name": "Diretor de Arte - Estruturar Cena",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        768,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "list",
+          "value": "gpt-5-mini",
+          "cachedResultName": "GPT-5-MINI"
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "id": "15fcda9d-6d3f-4342-8282-2d02a9eee72f",
+      "name": "OpenAI Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        752,
+        528
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": "LRwpsZ9r6pdmM4NI",
+          "name": "OpenAI account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const raw = $json.output ?? $json.text ?? $json.response ?? '';\n\nlet parsed;\n\ntry {\n  parsed = typeof raw === 'object' ? raw : JSON.parse(raw);\n} catch (e) {\n  const cleaned = String(raw)\n    .replace(/^```json\\s*/i, '')\n    .replace(/^```\\s*/i, '')\n    .replace(/```$/i, '')\n    .trim();\n\n  try {\n    parsed = JSON.parse(cleaned);\n  } catch (e2) {\n    parsed = {\n      erro: 'A IA não retornou JSON válido.',\n      resposta_bruta: raw\n    };\n  }\n}\n\nreturn {\n  json: {\n    sucesso: !parsed.erro,\n    etapa: 'estrutura_da_cena',\n    cena: parsed\n  }\n};"
+      },
+      "id": "d7b65382-4740-4f6c-8217-af5a742c92f3",
+      "name": "Validar JSON da Cena",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1040,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "373ac7f0-9c8f-4202-82dd-144fcd53fcf2",
+      "name": "Responder API",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1280,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## ETAPA 1 — Rascunho → Estrutura de Cena\n\nRecebe uma imagem de rascunho e opcionalmente um texto.\n\n1. Webhook recebe multipart/form-data\n2. OpenAI Vision interpreta o desenho\n3. Merge preserva a entrada original + análise\n4. AI Agent transforma a análise em JSON estrutural\n5. Code valida o JSON\n6. Webhook retorna a estrutura\n\n**Ainda não gera a imagem final.**",
+        "height": 360,
+        "width": 420
+      },
+      "id": "0c4b031f-1543-4c04-b72d-41f997e0293a",
+      "name": "Nota - Etapa 1",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -192,
+        512
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook - Rascunho": {
+      "main": [
+        [
+          {
+            "node": "IA Visão - Analisar Rascunho",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Preservar Rascunho + Análise",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "IA Visão - Analisar Rascunho": {
+      "main": [
+        [
+          {
+            "node": "Preservar Rascunho + Análise",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preservar Rascunho + Análise": {
+      "main": [
+        [
+          {
+            "node": "Diretor de Arte - Estruturar Cena",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Diretor de Arte - Estruturar Cena": {
+      "main": [
+        [
+          {
+            "node": "Validar JSON da Cena",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Diretor de Arte - Estruturar Cena",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validar JSON da Cena": {
+      "main": [
+        [
+          {
+            "node": "Responder API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "b4a7d5938be41597424f1e9e13dbf3a44f013a81253547440874c0e29eff664c"
+  }
+}
