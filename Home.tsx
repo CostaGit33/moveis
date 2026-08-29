@@ -3,7 +3,7 @@ import { ArrowUpRight, Check, ChevronDown, Clipboard, Download, FileImage, Histo
 import { toast } from "sonner";
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
-const DEFAULT_WEBHOOK_URL = import.meta.env.VITE_N8N_WEBHOOK_URL || "https://n8n.novaagencian8n.online/webhook/criar-cena";
+const DEFAULT_WEBHOOK_URL = import.meta.env.VITE_N8N_WEBHOOK_URL || "https://webhook.novaagencian8n.online/webhook/criar-cena-v2";
 const HISTORY_KEY = "moveis-planejados-history";
 type WorkflowPhase = "idle" | "uploading" | "analyzing" | "structuring" | "success" | "error";
 type JsonObject = Record<string, unknown>;
