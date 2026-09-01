@@ -1,99 +1,83 @@
-import { ChangeEvent, FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowUpRight, Check, ChevronDown, Clipboard, Download, FileImage, History, ImagePlus, LoaderCircle, LockKeyhole, ScanSearch, Send, Settings2, Sparkles, WandSparkles, X } from "lucide-react";
+import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { ArrowRight, Check, ChevronDown, Copy, Download, FileImage, History, ImagePlus, LoaderCircle, RefreshCw, Send, Settings2, Sparkles, Trash2, WandSparkles, X } from "lucide-react";
 import { toast } from "sonner";
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
 const DEFAULT_WEBHOOK_URL = import.meta.env.VITE_N8N_WEBHOOK_URL || "https://webhook.novaagencian8n.online/webhook/criar-cena-v2";
-const HISTORY_KEY = "moveis-planejados-history";
-type WorkflowPhase = "idle" | "uploading" | "analyzing" | "structuring" | "success" | "error";
-type JsonObject = Record<string, unknown>;
-type HistoryItem = { id: string; createdAt: string; fileName: string; brief: string; scene: JsonObject; raw: unknown };
+const HISTORY_KEY = "moveis-ai-history";
+type Phase = "idle" | "uploading" | "analyzing" | "generating" | "success" | "error";
+type Obj = Record<string, any>;
+type HistoryItem = { id: string; createdAt: string; fileName: string; brief: string; payload: Obj };
+type GeneratedImage = { src: string; mimeType: string; size?: string } | null;
 
-function isObject(value: unknown): value is JsonObject { return typeof value === "object" && value !== null && !Array.isArray(value); }
-function displayText(value: unknown, fallback = "Não informado"): string {
-  if (typeof value === "string") return value || fallback;
-  if (Array.isArray(value)) return value.length ? value.map((item) => displayText(item)).join(", ") : fallback;
-  if (isObject(value)) { const entries = Object.entries(value).filter(([, item]) => item !== null && item !== undefined && item !== ""); return entries.length ? entries.map(([key, item]) => `${key.replaceAll("_", " ")}: ${displayText(item)}`).join(" · ") : fallback; }
-  if (value === null || value === undefined) return fallback;
-  return String(value);
+const isObject = (v: unknown): v is Obj => !!v && typeof v === "object" && !Array.isArray(v);
+function text(v: unknown, fallback = "Não informado") {
+  if (typeof v === "string") return v.trim() || fallback;
+  if (Array.isArray(v)) return v.length ? v.map(x => text(x)).join(", ") : fallback;
+  if (isObject(v)) return Object.entries(v).map(([k, x]) => `${k.replaceAll("_", " ")}: ${text(x)}`).join(" · ") || fallback;
+  return v == null ? fallback : String(v);
 }
-function getScene(payload: unknown): JsonObject | null {
-  if (!isObject(payload)) return null;
-  if (isObject(payload.cena)) return payload.cena;
-  if (isObject(payload.data) && isObject(payload.data.cena)) return payload.data.cena;
-  if (isObject(payload.output)) return getScene(payload.output) || payload.output;
-  return payload;
+function imageFromPayload(payload: unknown): GeneratedImage {
+  if (!isObject(payload) || !isObject(payload.imagem)) return null;
+  const image = payload.imagem;
+  const metadata = isObject(payload.metadata) ? payload.metadata : {};
+  const mimeType = typeof image.mimeType === "string" && image.mimeType.startsWith("image/") ? image.mimeType : "image/png";
+  if (typeof image.url === "string" && image.url.trim()) return { src: image.url.trim(), mimeType, size: metadata.tamanho_saida };
+  if (typeof image.base64 === "string" && image.base64.trim()) {
+    const raw = image.base64.trim();
+    return { src: raw.startsWith("data:image/") ? raw : `data:${mimeType};base64,${raw}`, mimeType, size: metadata.tamanho_saida };
+  }
+  return null;
 }
-function getErrorMessage(error: unknown) { return error instanceof Error ? error.message : "Não foi possível concluir a análise."; }
-function SceneCard({ label, value, icon }: { label: string; value: unknown; icon: ReactNode }) { return <article className="scene-card"><div className="scene-card-icon">{icon}</div><div><span className="field-label">{label}</span><p>{displayText(value)}</p></div></article>; }
-function SceneList({ label, value }: { label: string; value: unknown }) { const items = Array.isArray(value) ? value : []; return <div className="scene-list-block"><span className="field-label">{label}</span>{items.length ? <ul>{items.map((item, index) => <li key={`${label}-${index}`}>{displayText(item)}</li>)}</ul> : <p className="muted-copy">Nenhum item identificado.</p>}</div>; }
 
 export default function Home() {
-  const [file, setFile] = useState<File | null>(null);
-  const [previewUrl, setPreviewUrl] = useState("");
-  const [brief, setBrief] = useState("");
-  const [webhookUrl, setWebhookUrl] = useState(() => localStorage.getItem("moveis-planejados-webhook") || DEFAULT_WEBHOOK_URL);
-  const [token, setToken] = useState("");
-  const [phase, setPhase] = useState<WorkflowPhase>("idle");
-  const [result, setResult] = useState<unknown>(null);
-  const [error, setError] = useState("");
-  const [copied, setCopied] = useState(false);
-  const [editing, setEditing] = useState(false);
-  const [draftJson, setDraftJson] = useState("");
-  const [editError, setEditError] = useState("");
-  const [history, setHistory] = useState<HistoryItem[]>([]);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => { const saved = localStorage.getItem(HISTORY_KEY); if (saved) { try { setHistory(JSON.parse(saved)); } catch { localStorage.removeItem(HISTORY_KEY); } } }, []);
-  useEffect(() => { if (!file) { setPreviewUrl(""); return; } const url = URL.createObjectURL(file); setPreviewUrl(url); return () => URL.revokeObjectURL(url); }, [file]);
-
-  const scene = useMemo(() => getScene(result), [result]);
-  const isLoading = phase === "uploading" || phase === "analyzing" || phase === "structuring";
-  const connectionReady = Boolean(webhookUrl.trim());
-  const phaseLabel = { idle: "Pronto para analisar", uploading: "Enviando rascunho", analyzing: "Interpretando desenho", structuring: "Organizando cena", success: "Análise concluída", error: "Falha na conexão" }[phase];
-
-  function saveWebhook(value: string) { setWebhookUrl(value); localStorage.setItem("moveis-planejados-webhook", value); }
-  function handleFile(event: ChangeEvent<HTMLInputElement>) { const selected = event.target.files?.[0]; if (!selected) return; if (!selected.type.startsWith("image/")) { toast.error("Escolha uma imagem PNG, JPG ou WEBP."); event.target.value = ""; return; } if (selected.size > MAX_FILE_SIZE) { toast.error("A imagem precisa ter no máximo 10 MB."); event.target.value = ""; return; } setFile(selected); setResult(null); setError(""); setPhase("idle"); }
-  function removeFile() { setFile(null); if (fileInputRef.current) fileInputRef.current.value = ""; }
-  function persistHistory(item: HistoryItem) { const next = [item, ...history.filter((entry) => entry.id !== item.id)].slice(0, 12); setHistory(next); localStorage.setItem(HISTORY_KEY, JSON.stringify(next)); }
-
-  async function submitWorkflow(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault(); setError("");
-    if (!file) { toast.error("Adicione o rascunho do ambiente antes de continuar."); return; }
-    const endpoint = webhookUrl.trim();
-    if (!endpoint) { setError("Configure a URL do webhook n8n para conectar o site ao fluxo."); toast.error("A URL do webhook ainda não foi configurada."); document.getElementById("connection")?.scrollIntoView({ behavior: "smooth", block: "center" }); return; }
-    const formData = new FormData(); formData.append("data", file, file.name); if (brief.trim()) formData.append("pedido", brief.trim());
-    setResult(null); setPhase("uploading");
+  const [file, setFile] = useState<File | null>(null), [preview, setPreview] = useState(""), [brief, setBrief] = useState("");
+  const [endpoint, setEndpoint] = useState(() => localStorage.getItem("moveis-webhook") || DEFAULT_WEBHOOK_URL), [token, setToken] = useState("");
+  const [showSettings, setShowSettings] = useState(false), [phase, setPhase] = useState<Phase>("idle"), [result, setResult] = useState<Obj | null>(null), [error, setError] = useState("");
+  const [history, setHistory] = useState<HistoryItem[]>([]); const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => { try { const s = localStorage.getItem(HISTORY_KEY); if (s) setHistory(JSON.parse(s)); } catch { localStorage.removeItem(HISTORY_KEY); } }, []);
+  useEffect(() => { if (!file) { setPreview(""); return; } const u = URL.createObjectURL(file); setPreview(u); return () => URL.revokeObjectURL(u); }, [file]);
+  const loading = ["uploading", "analyzing", "generating"].includes(phase), image = useMemo(() => imageFromPayload(result), [result]);
+  const status = phase === "success" ? "Pronto" : phase === "error" ? "Erro" : loading ? "Processando" : "Online";
+  function chooseFile(e: ChangeEvent<HTMLInputElement>) { const f = e.target.files?.[0]; if (!f) return; if (!f.type.startsWith("image/")) { toast.error("Envie PNG, JPG ou WEBP."); e.target.value = ""; return; } if (f.size > MAX_FILE_SIZE) { toast.error("A imagem deve ter no máximo 10 MB."); e.target.value = ""; return; } setFile(f); setResult(null); setError(""); setPhase("idle"); }
+  function removeFile() { setFile(null); if (inputRef.current) inputRef.current.value = ""; }
+  function saveEndpoint(v: string) { setEndpoint(v); localStorage.setItem("moveis-webhook", v); }
+  function saveHistory(payload: Obj) { const item: HistoryItem = { id: crypto.randomUUID(), createdAt: new Date().toISOString(), fileName: file?.name || "rascunho", brief, payload }; const next = [item, ...history].slice(0, 10); setHistory(next); localStorage.setItem(HISTORY_KEY, JSON.stringify(next)); }
+  async function submit(e: FormEvent) {
+    e.preventDefault(); setError(""); if (!file) { toast.error("Adicione um rascunho primeiro."); return; } if (!endpoint.trim()) { setShowSettings(true); setError("Configure o webhook do n8n."); return; }
+    const data = new FormData(); data.append("data", file, file.name); if (brief.trim()) data.append("pedido", brief.trim()); setPhase("uploading"); setResult(null);
     try {
       const headers: HeadersInit = {}; if (token.trim()) headers.Authorization = `Bearer ${token.trim()}`;
-      const response = await fetch(endpoint, { method: "POST", body: formData, headers });
-      setPhase("analyzing"); const responseText = await response.text(); let payload: unknown = responseText;
-      try { payload = responseText ? JSON.parse(responseText) : null; } catch { payload = responseText; }
-      if (!response.ok) { const serverMessage = isObject(payload) && typeof payload.message === "string" ? payload.message : `O webhook respondeu com HTTP ${response.status}.`; throw new Error(serverMessage); }
-      if (payload === null || payload === "" || (typeof payload === "object" && Object.keys(payload as object).length === 0)) {
-        throw new Error("O webhook aceitou a imagem, mas não devolveu a estrutura da cena. Verifique se o nó 'Responder API' está conectado ao final do fluxo e se o campo Response Body está configurado como {{$json}}.");
-      }
-      setPhase("structuring"); setResult(payload); setPhase("success");
-      const returnedScene = getScene(payload); if (returnedScene) persistHistory({ id: crypto.randomUUID(), createdAt: new Date().toISOString(), fileName: file.name, brief, scene: returnedScene, raw: payload });
-      toast.success("Estrutura de cena recebida e salva no histórico."); window.setTimeout(() => document.getElementById("result")?.scrollIntoView({ behavior: "smooth", block: "start" }), 80);
-    } catch (requestError) { const message = getErrorMessage(requestError); const friendlyMessage = message.includes("Failed to fetch") ? "Não foi possível acessar o webhook. Verifique a URL, o CORS do n8n e se o workflow está ativo." : message; setError(friendlyMessage); setPhase("error"); toast.error("A análise não foi concluída. Veja o detalhe abaixo."); }
+      const response = await fetch(endpoint.trim(), { method: "POST", body: data, headers }); setPhase("analyzing"); const raw = await response.text();
+      let payload: unknown; try { payload = raw ? JSON.parse(raw) : null; } catch { throw new Error("O workflow retornou uma resposta que não é JSON válido."); }
+      if (!response.ok) throw new Error(isObject(payload) && typeof payload.erro === "string" ? payload.erro : `O workflow respondeu com HTTP ${response.status}.`);
+      if (!isObject(payload)) throw new Error("O workflow não devolveu uma resposta válida.");
+      setPhase("generating"); setResult(payload); setPhase("success"); saveHistory(payload); toast.success("Projeto recebido com sucesso.");
+      requestAnimationFrame(() => document.getElementById("resultado")?.scrollIntoView({ behavior: "smooth", block: "start" }));
+    } catch (err) { const m = err instanceof Error ? err.message : "Não foi possível concluir a operação."; setError(m.includes("Failed to fetch") ? "Não foi possível acessar o workflow. Verifique o webhook e o CORS." : m); setPhase("error"); toast.error("A análise não foi concluída."); }
   }
+  async function copyPayload() { if (!result) return; await navigator.clipboard.writeText(JSON.stringify(result, null, 2)); toast.success("Resultado copiado."); }
+  function downloadImage() { if (!image) return; const a = document.createElement("a"); a.href = image.src; a.download = `moveis-${Date.now()}.${image.mimeType.includes("jpeg") ? "jpg" : "png"}`; a.click(); }
+  function clearHistory() { setHistory([]); localStorage.removeItem(HISTORY_KEY); toast.success("Histórico removido deste dispositivo."); }
+  function load(item: HistoryItem) { setResult(item.payload); setBrief(item.brief); setPhase("success"); requestAnimationFrame(() => document.getElementById("resultado")?.scrollIntoView({ behavior: "smooth" })); }
 
-  function startEditing() { if (!scene) return; setDraftJson(JSON.stringify(scene, null, 2)); setEditError(""); setEditing(true); }
-  function saveEditedStructure() { try { const parsed = JSON.parse(draftJson); if (!isObject(parsed)) throw new Error("A estrutura precisa ser um objeto JSON."); setResult(parsed); setEditing(false); setEditError(""); if (scene) persistHistory({ id: crypto.randomUUID(), createdAt: new Date().toISOString(), fileName: file?.name || "estrutura-editada", brief, scene: parsed, raw: parsed }); toast.success("Estrutura editada e salva no histórico."); } catch (editException) { setEditError(editException instanceof Error ? editException.message : "JSON inválido. Revise a estrutura e tente novamente."); } }
-  function loadHistory(item: HistoryItem) { setResult(item.raw); setBrief(item.brief); setPhase("success"); setEditing(false); window.setTimeout(() => document.getElementById("result")?.scrollIntoView({ behavior: "smooth", block: "start" }), 50); }
-  function clearHistory() { setHistory([]); localStorage.removeItem(HISTORY_KEY); toast.success("Histórico limpo neste dispositivo."); }
-  async function copyResult() { if (!result) return; await navigator.clipboard.writeText(JSON.stringify(result, null, 2)); setCopied(true); toast.success("Resultado copiado."); window.setTimeout(() => setCopied(false), 1800); }
-  function exportPdf() { if (!scene) return; toast("A janela de impressão será aberta. Escolha 'Salvar como PDF'."); window.setTimeout(() => window.print(), 180); }
-
-  return <div className="site-shell">
-    <header className="topbar page-width"><a className="brand-lockup" href="#top" aria-label="Móveis Planejados, início"><span className="brand-mark" aria-hidden="true"><i /><i /><i /></span><span className="brand-wordmark"><small>MP / ESTÚDIO DIGITAL</small><strong>Móveis <em>Planejados</em></strong></span></a><div className="topbar-actions"><div className={`connection-status ${connectionReady ? "ready" : ""}`}><span className="status-dot" />{connectionReady ? "Fluxo conectado" : "Aguardando conexão"}</div><a className="text-link" href="#connection">Configuração <Settings2 size={15} /></a></div></header>
-    <main id="top">
-      <section className="hero page-width"><div className="hero-copy"><p className="eyebrow"><span>01</span> Do rascunho ao projeto</p><h1>Dê forma à<br /><em>sua ideia.</em></h1><p className="hero-description">Envie o desenho do ambiente. Nossa inteligência interpreta a composição, os módulos e os detalhes para transformar intenção em estrutura.</p><a className="hero-cta" href="#workspace">Começar análise <ArrowUpRight size={18} /></a><div className="hero-metrics"><div><strong>01</strong><span>imagem<br />por vez</span></div><div><strong>AI</strong><span>leitura<br />estrutural</span></div><div><strong>JSON</strong><span>resultado<br />organizado</span></div></div></div><div className="hero-visual"><img src="/manus-storage/moveis-planejados-hero_39ac0328.jpg" alt="Cozinha planejada contemporânea em madeira e laca" /><div className="hero-visual-shade" /><div className="visual-caption"><span className="caption-line" /><span>Referência visual<br /><strong>Matéria · função · detalhe</strong></span></div><div className="visual-stamp"><Sparkles size={16} /><span>feito para<br />imaginar melhor</span></div></div></section>
-      <section className="workspace page-width" id="workspace"><div className="section-intro"><div><p className="eyebrow"><span>02</span> Entrada do projeto</p><h2>Envie o seu<br /><em>rascunho.</em></h2></div><p className="section-note">Quanto mais claro o desenho, melhor a leitura espacial. Anotações, setas e referências são bem-vindas.</p></div><form className="studio-form" onSubmit={submitWorkflow}><div className="upload-column"><label className={`dropzone ${file ? "has-file" : ""}`} htmlFor="drawing-upload"><input ref={fileInputRef} id="drawing-upload" type="file" accept="image/png,image/jpeg,image/webp" onChange={handleFile} />{file && previewUrl ? <><img className="upload-preview" src={previewUrl} alt="Pré-visualização do rascunho" /><span className="preview-overlay"><Check size={16} /> Imagem selecionada</span><button className="remove-file" type="button" onClick={(event) => { event.preventDefault(); removeFile(); }} aria-label="Remover imagem"><X size={17} /></button></> : <span className="dropzone-empty"><span className="upload-icon"><ImagePlus size={28} strokeWidth={1.35} /></span><strong>Solte o rascunho aqui</strong><span>ou clique para escolher uma imagem</span><small>PNG, JPG ou WEBP · até 10 MB</small></span>}</label><div className="upload-footer"><span><FileImage size={14} /> Campo enviado ao fluxo: <b>data</b></span><span>Imagem única</span></div></div>
-        <div className="brief-column"><div className="field-group"><label htmlFor="brief">O que você gostaria de preservar?</label><textarea id="brief" value={brief} onChange={(event) => setBrief(event.target.value.slice(0, 500))} placeholder="Ex.: manter a janela à direita, preservar os três módulos e considerar a anotação de sapateira..." rows={5} /><div className="field-hint"><span>Opcional</span><span>{brief.length}/500</span></div></div><div className="connection-card" id="connection"><div className="card-heading"><div><span className="mini-icon"><LockKeyhole size={15} /></span><div><span className="field-label">Conexão do workflow</span><strong>Webhook n8n</strong></div></div><span className={`mini-status ${connectionReady ? "ready" : ""}`}><i />{connectionReady ? "Ativo" : "Configurar"}</span></div><div className="connection-fields"><div className="input-with-label"><label htmlFor="webhook-url">URL do webhook</label><input id="webhook-url" type="url" value={webhookUrl} onChange={(event) => saveWebhook(event.target.value)} placeholder="https://seu-n8n.com/webhook/criar-cena" /></div><div className="input-with-label"><label htmlFor="webhook-token">Token <span>opcional</span></label><input id="webhook-token" type="password" value={token} onChange={(event) => setToken(event.target.value)} placeholder="Bearer token, se necessário" autoComplete="off" /></div></div><p className="connection-hint"><LockKeyhole size={13} /> O navegador envia <code>data</code> + <code>pedido</code> em multipart/form-data. Não defina Content-Type manualmente.</p></div><button className="submit-button" type="submit" disabled={isLoading || !file}>{isLoading ? <><LoaderCircle size={18} className="spin" /> {phaseLabel}...</> : <><WandSparkles size={18} /> Interpretar rascunho <Send size={16} /></>}</button>{!file && <p className="button-note">Adicione uma imagem para habilitar a análise.</p>}{error && <div className="error-message" role="alert"><X size={17} /><div><strong>Não foi possível enviar.</strong><span>{error}</span><small>Confira se o workflow está ativo, se a URL corresponde ao ambiente de produção e se o CORS permite chamadas deste domínio.</small></div></div>}</div></form></section>
-      <section className="history-section page-width" id="history"><div className="history-heading"><div><p className="eyebrow"><span>04</span> Memória do estúdio</p><h2>Suas <em>análises.</em></h2></div>{history.length > 0 && <button className="ghost-button" type="button" onClick={clearHistory}>Limpar histórico <X size={14} /></button>}</div>{history.length ? <div className="history-grid">{history.map((item) => <button className="history-item" type="button" key={item.id} onClick={() => loadHistory(item)}><span className="history-date"><History size={13} /> {new Date(item.createdAt).toLocaleDateString("pt-BR", { day: "2-digit", month: "short" })}</span><strong>{displayText(item.scene.tipo_ambiente, "Ambiente analisado")}</strong><span>{item.fileName}</span><ArrowUpRight size={15} /></button>)}</div> : <div className="history-empty"><History size={19} /><span>O histórico das análises fica salvo somente neste navegador.</span></div>}</section>
-      <section className="result-section page-width" id="result"><div className="result-header"><div><p className="eyebrow"><span>03</span> Saída do workflow</p><h2>Leitura da <em>cena.</em></h2></div><div className={`result-status ${phase === "success" ? "success" : phase === "error" ? "failure" : ""}`}><span className="status-dot" />{phaseLabel}</div></div>{scene ? <div className="result-content"><div className="result-toolbar"><div><span className="result-kicker"><Check size={13} /> Estrutura recebida</span><p>Revise os campos antes de salvar ou exportar o projeto.</p></div><div className="result-actions"><button className="copy-button" type="button" onClick={startEditing}><WandSparkles size={15} /> Editar estrutura</button><button className="copy-button" type="button" onClick={exportPdf}><Download size={15} /> Exportar PDF</button><button className="copy-button" type="button" onClick={copyResult}>{copied ? <Check size={15} /> : <Clipboard size={15} />} {copied ? "Copiado" : "Copiar JSON"}</button></div></div>{editing && <div className="editor-panel"><div><span className="field-label">Editor da estrutura</span><p>Edite o JSON retornado. Salvar atualiza a leitura e cria uma nova versão no histórico.</p></div><textarea className="json-editor" value={draftJson} onChange={(event) => setDraftJson(event.target.value)} spellCheck={false} />{editError && <p className="editor-error">{editError}</p>}<div className="editor-actions"><button className="ghost-button" type="button" onClick={() => setEditing(false)}>Cancelar</button><button className="submit-button small" type="button" onClick={saveEditedStructure}><Check size={15} /> Salvar edição</button></div></div>}<div className="scene-overview"><div className="scene-lead"><span className="field-label">Tipo de ambiente</span><h3>{displayText(scene.tipo_ambiente)}</h3><p>{displayText(scene.layout)}</p><div className="perspective-chip"><ScanSearch size={14} /> Perspectiva: {displayText(scene.perspectiva)}</div></div><div className="scene-cards"><SceneCard label="Módulo esquerdo" value={scene.modulo_esquerdo} icon={<span>←</span>} /><SceneCard label="Módulo central" value={scene.modulo_central} icon={<span>↕</span>} /><SceneCard label="Módulo direito" value={scene.modulo_direito} icon={<span>→</span>} /></div></div><div className="scene-details"><SceneList label="Elementos principais" value={scene.elementos_principais} /><SceneList label="Elementos superiores" value={scene.elementos_superiores} /><SceneList label="Aberturas" value={scene.aberturas} /><SceneList label="Detalhes anotados" value={scene.detalhes_anotados} /><SceneList label="Materiais informados" value={scene.materiais_informados} /><SceneList label="Incertezas" value={scene.incertezas} /></div><details className="raw-result"><summary>Ver resposta completa do workflow <ChevronDown size={16} /></summary><pre>{JSON.stringify(result, null, 2)}</pre></details></div> : <div className="result-empty"><div className="empty-orbit"><span /><Sparkles size={22} /></div><div><h3>Sua estrutura aparece aqui.</h3><p>Depois do envio, o retorno do fluxo será apresentado em uma leitura visual e também em JSON.</p></div><span className="empty-rule" /></div>}</section>
-    </main><footer className="footer page-width"><span>MÓVEIS PLANEJADOS / 2026</span><span>Uma ferramenta para começar melhor.</span><a href="#top">Voltar ao topo <ArrowUpRight size={14} /></a></footer>
+  return <div className="app-shell"><div className="ambient ambient-one"/><div className="ambient ambient-two"/>
+    <header className="nav container"><a href="#inicio" className="logo" aria-label="Móveis IA início"><span className="logo-orbit"><i/><i/><i/></span><span><b>MÓVEIS</b><small>INTELLIGENCE STUDIO</small></span></a><div className="nav-right"><span className="live"><i/> {status}</span><button className="icon-button" onClick={() => setShowSettings(v => !v)} aria-label="Configurações"><Settings2 size={18}/></button></div></header>
+    <main id="inicio">
+      <section className="hero container"><div className="hero-copy"><div className="pill"><Sparkles size={14}/> VISÃO COMPUTACIONAL · IA</div><h1>Do traço à<br/><span>visão real.</span></h1><p>Transforme um rascunho de móvel planejado em uma visualização arquitetônica, preservando a geometria e a intenção do desenho.</p><a href="#studio" className="primary-link">Começar projeto <ArrowRight size={17}/></a><div className="trust-row"><span><Check size={14}/> Referência visual</span><span><Check size={14}/> Leitura técnica</span><span><Check size={14}/> Render IA</span></div></div>
+        <div className="hero-art" aria-hidden="true"><div className="grid-plane"/><div className="art-frame"><div className="room-line line-a"/><div className="room-line line-b"/><div className="cabinet"><div/><div/><div/><div/><div/><div/></div><div className="mirror"/><div className="art-glow"/></div><div className="art-label label-top">STRUCTURE <b>01</b></div><div className="art-label label-bottom">MATERIAL / FORM / LIGHT</div></div>
+      </section>
+      <section className="studio container" id="studio"><div className="section-heading"><div><span className="section-index">01 — ENTRADA</span><h2>Seu rascunho é o<br/><em>ponto de partida.</em></h2></div><p>Envie uma imagem do desenho. A IA interpreta cotas, módulos, divisórias e relações espaciais sem substituir o que foi realmente observado.</p></div>
+        <form className="studio-grid" onSubmit={submit}><div><label className={`dropzone ${file ? "filled" : ""}`} htmlFor="drawing"><input ref={inputRef} id="drawing" type="file" accept="image/png,image/jpeg,image/webp" onChange={chooseFile}/>{file && preview ? <><img src={preview} alt="Rascunho selecionado"/><div className="drop-overlay"><Check size={15}/> Rascunho carregado</div><button type="button" className="remove" onClick={e => { e.preventDefault(); removeFile(); }} aria-label="Remover rascunho"><X size={16}/></button></> : <div className="drop-empty"><span className="upload-circle"><ImagePlus size={27}/></span><strong>Solte seu rascunho aqui</strong><span>ou toque para escolher uma imagem</span><small>PNG · JPG · WEBP · até 10 MB</small></div>}</label><div className="upload-meta"><span><FileImage size={14}/> Uma imagem por análise</span><span>Campo: <b>data</b></span></div></div>
+          <div className="brief-panel"><div className="field"><label htmlFor="brief">Direção do projeto <span>opcional</span></label><textarea id="brief" value={brief} onChange={e => setBrief(e.target.value.slice(0, 500))} placeholder="Ex.: preserve os três módulos, mantenha a janela à direita e use acabamento branco."/><div className="counter">{brief.length}/500</div></div>
+            {showSettings && <div className="settings-card"><div className="settings-title"><Settings2 size={16}/> Conexão técnica</div><label>URL do webhook n8n<input type="url" value={endpoint} onChange={e => saveEndpoint(e.target.value)}/></label><label>Token <small>opcional</small><input type="password" value={token} onChange={e => setToken(e.target.value)} placeholder="Bearer token"/></label><p>O navegador envia <code>data</code> e <code>pedido</code> em multipart/form-data.</p></div>}
+            <button className="generate" type="submit" disabled={loading || !file}>{loading ? <><LoaderCircle className="spin" size={18}/> {phase === "uploading" ? "Enviando rascunho" : phase === "analyzing" ? "Lendo estrutura" : "Gerando visual"}...</> : <><WandSparkles size={18}/> Gerar visualização <Send size={15}/></>}</button>{!file && <div className="helper">Adicione uma imagem para iniciar.</div>}{error && <div className="error-box"><X size={17}/><span>{error}</span></div>}
+          </div></form></section>
+      <section className="result-section container" id="resultado"><div className="section-heading result-heading"><div><span className="section-index">02 — RESULTADO</span><h2>Da análise à<br/><em>imagem.</em></h2></div><p>{result ? "O resultado abaixo é a resposta do workflow conectado ao estúdio." : "A visualização final aparecerá aqui após o processamento do seu rascunho."}</p></div>
+        {!result ? <div className="empty-result"><div><Sparkles size={22}/><strong>Aguardando seu projeto</strong><span>Envie um rascunho para preencher esta área.</span></div></div> : <div className="result-layout"><div className="result-image-card"><div className="result-toolbar"><span><span className="online-dot"/> VISUALIZAÇÃO FINAL</span>{image && <button onClick={downloadImage}><Download size={15}/> Salvar imagem</button>}</div>{image ? <div className="generated-frame"><img src={image.src} alt="Visualização final do móvel planejado"/></div> : <div className="missing-image"><ImagePlus size={25}/><strong>A imagem ainda não foi retornada pelo workflow</strong><span>O processamento foi concluído, mas a resposta não contém URL ou Base64 de imagem.</span></div>}</div>
+            <aside className="result-info"><div className="success-badge"><Check size={15}/> {result.codigo || "PROCESSAMENTO CONCLUÍDO"}</div><h3>Leitura do projeto</h3><dl><div><dt>Etapa</dt><dd>{text(result.etapa)}</dd></div><div><dt>Referência</dt><dd>{result.imagem?.tipo === "url" || result.imagem?.base64 ? "Utilizada" : "Recebida"}</dd></div><div><dt>Saída</dt><dd>{text(result.metadata?.tamanho_saida, "Imagem")}</dd></div></dl><details><summary>Ver especificação técnica <ChevronDown size={16}/></summary><pre>{text(result.metadata?.especificacao_tecnica || result.especificacao_tecnica || result.metadata?.identificacao_movel)}</pre></details><div className="info-actions"><button onClick={copyPayload}><Copy size={15}/> Copiar resposta</button><button onClick={() => document.getElementById("studio")?.scrollIntoView({ behavior: "smooth" })}><RefreshCw size={15}/> Novo projeto</button></div></aside></div>}
+      </section>
+      {history.length > 0 && <section className="history container"><div className="history-title"><div><span className="section-index">03 — MEMÓRIA</span><h2>Projetos <em>recentes.</em></h2></div><button onClick={clearHistory}><Trash2 size={14}/> Limpar</button></div><div className="history-grid">{history.map(item => <button className="history-item" key={item.id} onClick={() => load(item)}><span className="history-icon"><History size={17}/></span><span><strong>{item.fileName}</strong><small>{new Date(item.createdAt).toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" })}</small></span><ArrowRight size={16}/></button>)}</div></section>}
+    </main><footer className="footer container"><span>© {new Date().getFullYear()} MÓVEIS INTELLIGENCE STUDIO</span><span>Estrutura primeiro · estética depois</span></footer>
   </div>;
 }
