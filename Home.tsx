@@ -17,16 +17,28 @@ function text(v: unknown, fallback = "Não informado") {
   if (isObject(v)) return Object.entries(v).map(([k, x]) => `${k.replaceAll("_", " ")}: ${text(x)}`).join(" · ") || fallback;
   return v == null ? fallback : String(v);
 }
+function normalizeBase64(value: string, mimeType: string) {
+  const raw = value.trim();
+  if (!raw) return "";
+  if (raw.startsWith("data:image/")) return raw;
+  return `data:${mimeType};base64,${raw.replace(/\s+/g, "")}`;
+}
 function imageFromPayload(payload: unknown): GeneratedImage {
-  if (!isObject(payload) || !isObject(payload.imagem)) return null;
-  const image = payload.imagem;
+  if (!isObject(payload)) return null;
+  const image = isObject(payload.imagem) ? payload.imagem : {};
   const metadata = isObject(payload.metadata) ? payload.metadata : {};
   const mimeType = typeof image.mimeType === "string" && image.mimeType.startsWith("image/") ? image.mimeType : "image/png";
   if (typeof image.url === "string" && image.url.trim()) return { src: image.url.trim(), mimeType, size: metadata.tamanho_saida };
-  if (typeof image.base64 === "string" && image.base64.trim()) {
-    const raw = image.base64.trim();
-    return { src: raw.startsWith("data:image/") ? raw : `data:${mimeType};base64,${raw}`, mimeType, size: metadata.tamanho_saida };
+  if (typeof image.base64 === "string" && image.base64.trim()) return { src: normalizeBase64(image.base64, mimeType), mimeType, size: metadata.tamanho_saida };
+  if (Array.isArray(payload.data) && payload.data.length > 0) {
+    const first = payload.data[0];
+    if (isObject(first)) {
+      if (typeof first.url === "string" && first.url.trim()) return { src: first.url.trim(), mimeType, size: metadata.tamanho_saida };
+      if (typeof first.b64_json === "string" && first.b64_json.trim()) return { src: normalizeBase64(first.b64_json, mimeType), mimeType, size: metadata.tamanho_saida };
+    }
   }
+  if (typeof payload.image_url === "string" && payload.image_url.trim()) return { src: payload.image_url.trim(), mimeType, size: metadata.tamanho_saida };
+  if (typeof payload.image_base64 === "string" && payload.image_base64.trim()) return { src: normalizeBase64(payload.image_base64, mimeType), mimeType, size: metadata.tamanho_saida };
   return null;
 }
 
@@ -47,8 +59,18 @@ export default function Home() {
     e.preventDefault(); setError(""); if (!file) { toast.error("Adicione um rascunho primeiro."); return; } if (!endpoint.trim()) { setShowSettings(true); setError("Configure o webhook do n8n."); return; }
     const data = new FormData(); data.append("data", file, file.name); if (brief.trim()) data.append("pedido", brief.trim()); setPhase("uploading"); setResult(null);
     try {
-      const headers: HeadersInit = {}; if (token.trim()) headers.Authorization = `Bearer ${token.trim()}`;
-      const response = await fetch(endpoint.trim(), { method: "POST", body: data, headers }); setPhase("analyzing"); const raw = await response.text();
+      const headers: HeadersInit = { Accept: "application/json" }; if (token.trim()) headers.Authorization = `Bearer ${token.trim()}`;
+      const response = await fetch(endpoint.trim(), { method: "POST", body: data, headers }); setPhase("analyzing");
+      const contentType = response.headers.get("content-type") || "";
+      if (contentType.startsWith("image/")) {
+        if (!response.ok) throw new Error(`O workflow respondeu com HTTP ${response.status}.`);
+        const blob = await response.blob();
+        const directUrl = URL.createObjectURL(blob);
+        const payload = { sucesso: true, codigo: "IMAGE_GENERATED_BINARY", etapa: "imagem_gerada", timestamp: new Date().toISOString(), imagem: { tipo: "url", url: directUrl, base64: null, mimeType: blob.type || "image/png" }, metadata: { referencia_visual_utilizada: true, tamanho_saida: "imagem binária" } };
+        setPhase("generating"); setResult(payload); setPhase("success"); saveHistory(payload); toast.success("Projeto recebido com sucesso.");
+        requestAnimationFrame(() => document.getElementById("resultado")?.scrollIntoView({ behavior: "smooth", block: "start" })); return;
+      }
+      const raw = await response.text();
       let payload: unknown; try { payload = raw ? JSON.parse(raw) : null; } catch { throw new Error("O workflow retornou uma resposta que não é JSON válido."); }
       if (!response.ok) throw new Error(isObject(payload) && typeof payload.erro === "string" ? payload.erro : `O workflow respondeu com HTTP ${response.status}.`);
       if (!isObject(payload)) throw new Error("O workflow não devolveu uma resposta válida.");
